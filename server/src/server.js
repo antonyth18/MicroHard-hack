@@ -71,10 +71,10 @@ app.use((err, req, res, next) => {
 // 404 handler - must be last
 app.use((req, res) => {
   console.log(`⚠️  404 - Route not found: ${req.method} ${req.originalUrl}`);
-  console.log(`   Available routes: POST /api/review, POST /api/fix, GET /api/health, GET /api/github/*`);
+  console.log(`   Available routes: POST /api/review, GET /api/health, GET /api/github/*`);
   res.status(404).json({
     error: `Route not found: ${req.method} ${req.originalUrl}`,
-    message: 'Available routes: POST /api/review, POST /api/fix, GET /api/health'
+    message: 'Available routes: POST /api/review, GET /api/health'
   });
 });
 
@@ -85,18 +85,17 @@ app.listen(PORT, () => {
   console.log(`🔗 GitHub OAuth endpoints available at /api/github/*`);
   console.log(`🌐 CORS enabled for: ${process.env.CLIENT_URL || 'http://localhost:5173'}`);
   console.log(`📡 API endpoints:`);
-  console.log(`   - POST /api/review - Code review endpoint`);
-  console.log(`   - POST /api/fix - Auto-exorcise (fix code) endpoint`);
+  console.log(`   - POST /api/review - Code review endpoint (only called from summon button)`);
   console.log(`   - GET  /api/github/login - GitHub OAuth login`);
   console.log(`   - GET  /api/github/callback - GitHub OAuth callback`);
   console.log(`   - GET  /api/github/repos - Fetch user repositories`);
   console.log(`   - POST /api/github/pull-request - Create pull request`);
   
-  // Optionally start RunAnywhere microservice (in background, won't block server start)
-  if (process.env.RUNANYWHERE_TOKEN) {
-    // Import in background to not block server startup
-    import('../runanywhere.js').catch((err) => {
-      // Silently fail if SDK is not available
-    });
-  }
+  // RunAnywhere integration disabled - Gemini API only called from summon button
+  // To enable RunAnywhere, uncomment the code below:
+  // if (process.env.RUNANYWHERE_TOKEN) {
+  //   import('../runanywhere.js').catch((err) => {
+  //     // Silently fail if SDK is not available
+  //   });
+  // }
 });

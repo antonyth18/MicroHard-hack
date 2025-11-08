@@ -167,8 +167,21 @@ Guidelines:
       throw new Error('The Reaper could not be summoned… check your API key.');
     }
     
+    // Handle quota/quota exceeded errors with more helpful messages
     if (error.message?.includes('quota') || error.message?.includes('429') || error.message?.includes('Too Many Requests') || error.message?.includes('RESOURCE_EXHAUSTED')) {
-      throw new Error('The Reaper is overwhelmed. Please wait a moment and try again.');
+      // Try to extract retry delay from error message
+      const retryMatch = error.message.match(/retry in ([\d.]+)s/i) || error.message.match(/Please retry in ([\d.]+)s/i);
+      const retrySeconds = retryMatch ? Math.ceil(parseFloat(retryMatch[1])) : null;
+      
+      // Check if it's a daily quota limit
+      if (error.message?.includes('free_tier_requests') || error.message?.includes('FreeTier') || error.message?.includes('limit: 200')) {
+        const waitTime = retrySeconds ? ` Please wait ${retrySeconds} seconds, or try again tomorrow.` : ' You have reached the free tier daily limit of 200 requests. Please try again tomorrow or upgrade your plan.';
+        throw new Error(`The Reaper has reached its daily quota limit.${waitTime}`);
+      }
+      
+      // Generic quota error with retry time if available
+      const waitTime = retrySeconds ? ` Please wait ${retrySeconds} seconds before trying again.` : ' Please wait a moment and try again.';
+      throw new Error(`The Reaper is overwhelmed.${waitTime}`);
     }
     
     if (error.message?.includes('rate limit') || error.message?.includes('RATE_LIMIT_EXCEEDED')) {
@@ -187,55 +200,3 @@ Guidelines:
   }
 }
 
-export async function fixCode(code, language) {
-  // Check API key
-  if (!process.env.GEMINI_API_KEY) {
-    throw new Error('API key not configured. Please set GEMINI_API_KEY in environment variables.');
-  }
-
-  try {
-    // Use model from env or default to gemini-2.0-flash
-    const modelName = process.env.GEMINI_MODEL || DEFAULT_MODEL;
-    const model = genAI.getGenerativeModel({ model: modelName });
-    console.log(`✅ Using Gemini model for fixCode: ${modelName}`);
-
-    const prompt = `You are "The Code Reaper" — an ancient haunted compiler that fixes cursed code.
-
-Fix all errors, warnings, and apply suggestions to this ${language} code:
-
-\`\`\`${language}
-${code}
-\`\`\`
-
-Return ONLY the fixed code. No explanation, no markdown, no JSON, just the complete corrected code.`;
-
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    let fixedCode = response.text();
-
-    // Clean up the response
-    fixedCode = fixedCode.trim();
-    // Remove markdown code blocks if present
-    fixedCode = fixedCode.replace(/^```(?:${language})?\s*/i, '').replace(/\s*```$/g, '');
-    
-    return fixedCode;
-  } catch (error) {
-    console.error('Gemini API error (fixCode):', error);
-    
-    if (error.message?.includes('API key') || error.message?.includes('GEMINI_API_KEY') || error.message?.includes('API_KEY_NOT_VALID')) {
-      throw new Error('The Reaper could not be summoned… check your API key.');
-    }
-    
-    if (error.message?.includes('quota') || error.message?.includes('429') || error.message?.includes('Too Many Requests') || error.message?.includes('RESOURCE_EXHAUSTED')) {
-      throw new Error('The Reaper is overwhelmed. Please wait a moment and try again.');
-    }
-
-    if (error.message?.includes('model') || error.message?.includes('MODEL_NOT_FOUND') || error.message?.includes('404 Not Found') || error.message?.includes('is not found')) {
-      const currentModel = process.env.GEMINI_MODEL || DEFAULT_MODEL;
-      console.error(`❌ Model "${currentModel}" is not available. Error: ${error.message}`);
-      throw new Error(`The Gemini model "${currentModel}" is not available for your API key. Please check your API key permissions and ensure gemini-2.0-flash is available.`);
-    }
-
-    throw new Error(`Auto-exorcise failed: ${error.message || 'Unknown error'}`);
-  }
-}

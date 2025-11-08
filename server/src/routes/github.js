@@ -61,21 +61,20 @@ router.get('/login', (req, res) => {
  */
 router.get('/callback', async (req, res) => {
   const { code } = req.query;
+  const frontendUrl = process.env.CLIENT_URL || 'http://localhost:5173';
   
+  // Always redirect to frontend, even on errors (to avoid pretty-print page)
   if (!code) {
-    return res.status(400).json({
-      error: 'Missing authorization code'
-    });
+    const errorMsg = encodeURIComponent('Missing authorization code from GitHub');
+    return res.redirect(`${frontendUrl}#error=${errorMsg}`);
   }
 
   if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
-    return res.status(500).json({
-      error: 'GitHub OAuth not configured'
-    });
+    const errorMsg = encodeURIComponent('GitHub OAuth not configured. Please set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in your .env file.');
+    return res.redirect(`${frontendUrl}#error=${errorMsg}`);
   }
 
   try {
-
     // Exchange code for access token
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
@@ -91,30 +90,41 @@ router.get('/callback', async (req, res) => {
     });
 
     if (!tokenResponse.ok) {
-      throw new Error(`GitHub API responded with status ${tokenResponse.status}`);
+      const errorText = await tokenResponse.text();
+      console.error('❌ GitHub OAuth token exchange failed:', tokenResponse.status, errorText);
+      const errorMsg = encodeURIComponent(`GitHub OAuth failed: ${tokenResponse.status} ${tokenResponse.statusText}`);
+      return res.redirect(`${frontendUrl}#error=${errorMsg}`);
     }
 
     const tokenData = await tokenResponse.json();
 
     if (tokenData.error || !tokenData.access_token) {
-      return res.status(500).json({
-        error: 'GitHub OAuth failed',
-        message: tokenData.error_description || 'No access token received'
-      });
+      const errorDescription = tokenData.error_description || tokenData.error || 'No access token received';
+      console.error('❌ GitHub OAuth error:', tokenData);
+      
+      // Provide helpful error messages
+      let errorMsg = 'GitHub OAuth failed';
+      if (errorDescription.includes('client_id') || errorDescription.includes('client_secret')) {
+        errorMsg = 'GitHub OAuth configuration error: Please check your GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in your .env file.';
+      } else if (errorDescription.includes('redirect_uri')) {
+        errorMsg = 'GitHub OAuth redirect URI mismatch: Please ensure GITHUB_REDIRECT_URI matches your GitHub app settings.';
+      } else {
+        errorMsg = `GitHub OAuth failed: ${errorDescription}`;
+      }
+      
+      return res.redirect(`${frontendUrl}#error=${encodeURIComponent(errorMsg)}`);
     }
 
     const accessToken = tokenData.access_token;
 
-    // Redirect to frontend with token
-    const frontendUrl = process.env.CLIENT_URL || 'http://localhost:5173';
-    const redirectUrl = `${frontendUrl}/?token=${accessToken}`;
+    // Redirect to frontend with token in hash (not query param) to avoid pretty-print
+    const redirectUrl = `${frontendUrl}#token=${accessToken}`;
     
     res.redirect(redirectUrl);
   } catch (error) {
-    res.status(500).json({
-      error: 'GitHub OAuth failed',
-      message: error.message
-    });
+    console.error('❌ GitHub OAuth callback error:', error);
+    const errorMsg = encodeURIComponent(`GitHub OAuth failed: ${error.message}`);
+    return res.redirect(`${frontendUrl}#error=${errorMsg}`);
   }
 });
 

@@ -128,8 +128,10 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
   const [isFixing, setIsFixing] = useState(false);
   const [improvedCode, setImprovedCode] = useState<string | null>(null);
   const [codeAccepted, setCodeAccepted] = useState(false);
-  const [isAutoReviewing, setIsAutoReviewing] = useState(false);
+  const [rateLimited, setRateLimited] = useState(false);
+  const [rateLimitCooldown, setRateLimitCooldown] = useState(0);
   const [showPRModal, setShowPRModal] = useState(false);
+  const isRequestInProgressRef = useRef(false);
   const [showUpdatedCodeModal, setShowUpdatedCodeModal] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [repos, setRepos] = useState<any[]>([]);
@@ -137,9 +139,6 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
   const [filePath, setFilePath] = useState<string>('');
   const [isCreatingPR, setIsCreatingPR] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const isManualReviewRef = useRef(false);
-  const isInitialMountRef = useRef(true);
 
   // Update error intensity based on curse level
   useEffect(() => {
@@ -206,82 +205,31 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
     setError(null);
   };
 
-  // Debounced auto-review effect - triggers when user stops typing for 2 seconds
-  useEffect(() => {
-    // Skip auto-review on initial mount (when component first loads with template code)
-    if (isInitialMountRef.current) {
-      isInitialMountRef.current = false;
-      return;
-    }
 
-    // Clear any existing timer
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
-    }
-
-    // Don't auto-review if:
-    // - Code is empty
-    // - Currently analyzing (manual or auto)
-    // - This is a manual review (button click)
-    if (!code.trim() || isAnalyzing || isManualReviewRef.current) {
-      // Reset manual review flag after a short delay
-      if (isManualReviewRef.current) {
-        setTimeout(() => {
-          isManualReviewRef.current = false;
-        }, 100);
-      }
-      return;
-    }
-
-    // Set a timer to auto-review after user stops typing for 2 seconds
-    debounceTimerRef.current = setTimeout(async () => {
-      // Double-check conditions before triggering review
-      if (code.trim() && !isAnalyzing && !isManualReviewRef.current) {
-        console.log('🔄 Auto-review triggered after 2s of inactivity');
-        setIsAutoReviewing(true);
-        // Small delay to show the "Calling Gemini..." indicator
-        await new Promise(resolve => setTimeout(resolve, 100));
-        // Call summonReaper with isManual=false to indicate auto-review
-        await summonReaper(false);
-      }
-    }, 2000); // 2 second debounce
-
-    // Cleanup function
-    return () => {
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
-        debounceTimerRef.current = null;
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [code, selectedLanguage, isAnalyzing]);
-
-  const summonReaper = async (isManual = true) => {
+  const summonReaper = async () => {
+    console.log('🔴 summonReaper called - checking guards...');
+    
     if (!code.trim()) {
       console.warn('⚠️ Cannot review: code is empty');
       return;
     }
 
-    // If already analyzing, don't start another review
+    // STRICT duplicate request prevention - check both state and ref
     if (isAnalyzing) {
-      console.warn('⚠️ Already analyzing, skipping duplicate request');
+      console.warn('⚠️ Already analyzing (state check), skipping duplicate request');
       return;
     }
-
-    // Set manual review flag to prevent auto-review from triggering
-    if (isManual) {
-      isManualReviewRef.current = true;
-      // Clear any pending auto-review
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
-        debounceTimerRef.current = null;
-      }
-      // Clear auto-reviewing state if it was set
-      setIsAutoReviewing(false);
+    
+    if (isRequestInProgressRef.current) {
+      console.warn('⚠️ Request in progress (ref check), skipping duplicate request');
+      return;
     }
     
+    // Set flag IMMEDIATELY to prevent any duplicate calls
+    isRequestInProgressRef.current = true;
     setIsAnalyzing(true);
+    
+    console.log('✅ Guards passed - making API call now');
     setShowResponse(false);
     setReviewData(null);
     setCurseLevel(0);
@@ -320,8 +268,10 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
     }, 50);
 
     try {
-      // Call the review API
+      // Call the review API - ONLY ONCE
+      console.log('📞 Calling reviewCode API...');
       const result = await reviewCode(code, selectedLanguage);
+      console.log('✅ API call completed successfully');
       
       // Stop the progress animation
       clearInterval(interval);
@@ -347,7 +297,7 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
       // Show response after a brief delay
       setTimeout(() => {
         setIsAnalyzing(false);
-        setIsAutoReviewing(false);
+        isRequestInProgressRef.current = false;
         setShowResponse(true);
         setShowGhosts(false);
       }, 300);
@@ -358,8 +308,28 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
       
       // Extract error message
       let errorMessage = 'Failed to review code';
+      let isRateLimited = false;
+      
       if (err instanceof Error) {
         errorMessage = err.message;
+        // Check if it's a rate limit error
+        if (errorMessage.includes('overwhelmed') || errorMessage.includes('Too many requests') || errorMessage.includes('429')) {
+          isRateLimited = true;
+          setRateLimited(true);
+          setRateLimitCooldown(10); // 10 second cooldown
+          
+          // Countdown timer
+          const cooldownInterval = setInterval(() => {
+            setRateLimitCooldown((prev) => {
+              if (prev <= 1) {
+                clearInterval(cooldownInterval);
+                setRateLimited(false);
+                return 0;
+              }
+              return prev - 1;
+            });
+          }, 1000);
+        }
       } else if (typeof err === 'string') {
         errorMessage = err;
       }
@@ -373,7 +343,7 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
       
       setError(errorMessage);
       setIsAnalyzing(false);
-      setIsAutoReviewing(false);
+      isRequestInProgressRef.current = false;
       setShowResponse(true);
       setShowGhosts(false);
     }
@@ -643,38 +613,19 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
                 
                 {/* Editable Code Area */}
                 <div className="p-4 flex-1 flex flex-col relative">
-                  {/* Auto-review loading indicator - shows when auto-review is triggered */}
-                  {isAutoReviewing && (
-                    <motion.div
-                      initial={{ opacity: 0, y: -10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -10 }}
-                      className="absolute top-2 left-4 right-4 z-10 bg-purple-900/80 border border-purple-500/50 rounded px-3 py-2 flex items-center gap-2 backdrop-blur-sm shadow-lg"
-                      style={{ fontFamily: "'Share Tech Mono', monospace" }}
-                    >
-                      <motion.div
-                        className="w-4 h-4 border-2 border-purple-400 border-t-transparent rounded-full"
-                        animate={{ rotate: 360 }}
-                        transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
-                      />
-                      <span className="text-purple-300 text-xs font-medium">Calling Gemini...</span>
-                    </motion.div>
-                  )}
                   <Textarea
                     value={code}
                     onChange={(e) => {
                       setCode(e.target.value);
-                      // Reset manual review flag when user types
-                      isManualReviewRef.current = false;
                       // Clear improved code and acceptance state when user types
                       setImprovedCode(null);
                       setCodeAccepted(false);
-                      // Clear auto-reviewing state when user types
-                      setIsAutoReviewing(false);
+                      setShowResponse(false);
+                      setReviewData(null);
                     }}
                     className="flex-1 bg-transparent border-none text-green-400 resize-none focus-visible:ring-0 focus-visible:ring-offset-0 overflow-auto"
                     style={{ fontFamily: "'Share Tech Mono', monospace" }}
-                    placeholder="Paste your cursed code here... (Auto-review after 2s of inactivity)"
+                    placeholder="Paste your cursed code here... Click 'Summon the Reaper' to review"
                     spellCheck={false}
                   />
                   {/* Cursor blink effect */}
@@ -1018,17 +969,43 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
                         <motion.div
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
-                          className="mt-4 p-4 bg-red-950/30 border-2 border-red-500/50 rounded-lg"
+                          className="mt-4 p-5 bg-red-950/50 border-2 border-red-500/70 rounded-lg shadow-xl"
                         >
-                          <p className="text-red-400 font-bold mb-2 text-sm" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
-                            💀 Error
-                          </p>
-                          <p className="text-red-300 text-sm" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                          <div className="flex items-center gap-2 mb-3">
+                            <Skull className="w-5 h-5 text-red-400" />
+                            <p className="text-red-400 font-bold text-base" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                              💀 Error
+                            </p>
+                          </div>
+                          <p className="text-red-300 text-sm mb-2 leading-relaxed" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
                             {error}
                           </p>
-                          <p className="text-red-400/70 text-xs mt-2" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
-                            Check the browser console for more details.
-                          </p>
+                          {error.includes('overwhelmed') || error.includes('Too many requests') || error.includes('quota limit') || error.includes('daily quota') ? (
+                            <div className="mt-3 p-3 bg-yellow-950/30 border border-yellow-500/50 rounded">
+                              <p className="text-yellow-300 text-xs leading-relaxed" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                                ⚠️ {error.includes('daily quota') ? (
+                                  <>
+                                    <strong>Daily Quota Reached:</strong> You've hit the free tier limit of 200 requests/day. 
+                                    The quota resets daily (usually at midnight Pacific Time). 
+                                    {error.includes('wait') && error.match(/wait (\d+)/) && (
+                                      <> You can retry in {error.match(/wait (\d+)/)?.[1]} seconds, or wait for the daily reset.</>
+                                    )}
+                                    <br /><br />
+                                    <strong>Options:</strong>
+                                    <br />• Wait for the daily reset (usually midnight PT)
+                                    <br />• Upgrade your Google Cloud plan for higher quotas
+                                    <br />• Use a different API key if you have one
+                                  </>
+                                ) : (
+                                  'The Reaper needs a moment to rest. Please wait before summoning again.'
+                                )}
+                              </p>
+                            </div>
+                          ) : (
+                            <p className="text-red-400/70 text-xs mt-2" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                              Check the browser console for more details.
+                            </p>
+                          )}
                         </motion.div>
                       )}
                     </AnimatePresence>
@@ -1041,8 +1018,13 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
                     >
                     <Button
                       id="summon-btn"
-                      onClick={() => summonReaper(true)}
-                      disabled={isAnalyzing || !code.trim()}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        console.log('🖱️ Button clicked - calling summonReaper');
+                        summonReaper();
+                      }}
+                      disabled={isAnalyzing || !code.trim() || rateLimited}
                       className="w-full bg-gradient-to-r from-purple-600 to-red-600 hover:from-purple-700 hover:to-red-700 border-2 border-purple-500/50 disabled:opacity-50 disabled:cursor-not-allowed relative overflow-hidden"
                       style={{ fontFamily: "'Share Tech Mono', monospace" }}
                     >
@@ -1059,7 +1041,11 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
                           }}
                         />
                       <span className="relative z-10">
-                        {isAnalyzing ? 'Summoning...' : 'Summon the Reaper (Manual)'}
+                        {rateLimited 
+                          ? `⏳ The Reaper is resting... (${rateLimitCooldown}s)`
+                          : isAnalyzing 
+                            ? 'Summoning the Reaper...' 
+                            : 'Summon the Reaper'}
                       </span>
                     </Button>
                   </motion.div>
@@ -1140,10 +1126,9 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
 
       {/* Updated Code Modal with Diff */}
       <Dialog open={showUpdatedCodeModal} onOpenChange={setShowUpdatedCodeModal}>
-        <DialogContent className="bg-black/98 border-red-500/50 text-white max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
-          {/* Fog/Glow overlay effect */}
-          <div className="absolute inset-0 bg-gradient-to-br from-red-900/20 via-purple-900/20 to-red-900/20 pointer-events-none" />
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-red-500/10 via-transparent to-transparent pointer-events-none" />
+        <DialogContent className="bg-[#0A0A0A] border-2 border-red-500/70 text-white max-w-4xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl">
+          {/* Subtle overlay effect - much more opaque */}
+          <div className="absolute inset-0 bg-gradient-to-br from-red-950/40 via-purple-950/40 to-red-950/40 pointer-events-none" />
           
           <DialogHeader className="relative z-10">
             <DialogTitle className="text-red-400 flex items-center gap-2" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
@@ -1158,25 +1143,48 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
           <div className="relative z-10 flex-1 overflow-auto space-y-4 py-4">
             {/* Changes Summary */}
             {reviewData?.changes && reviewData.changes.length > 0 && (
-              <div className="bg-gray-900/50 border border-gray-700 rounded-lg p-4">
-                <p className="text-sm text-gray-300 mb-2" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
-                  Changes ({reviewData.changes.length} line{reviewData.changes.length !== 1 ? 's' : ''} modified):
-                </p>
-                <div className="space-y-2 max-h-32 overflow-auto">
+              <div className="bg-[#1A1A1A] border-2 border-purple-500/70 rounded-lg p-5 shadow-xl">
+                <div className="flex items-center gap-2 mb-4">
+                  <Zap className="w-5 h-5 text-purple-300" />
+                  <p className="text-base font-bold text-purple-200" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                    Changes Detected ({reviewData.changes.length} line{reviewData.changes.length !== 1 ? 's' : ''})
+                  </p>
+                </div>
+                <div className="space-y-3 max-h-48 overflow-auto">
                   {reviewData.changes.map((change, idx) => (
-                    <div key={idx} className="bg-black/50 rounded p-2 text-xs">
-                      <div className="flex items-start gap-2">
-                        <span className="text-gray-500 flex-shrink-0">Line {change.line}:</span>
-                        <div className="flex-1 space-y-1">
-                          <div className="text-red-400 line-through opacity-70">
-                            <span className="text-gray-600">-</span> {change.old}
+                    <motion.div
+                      key={idx}
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: idx * 0.1 }}
+                      className="bg-[#0F0F0F] border border-gray-600/70 rounded-lg p-3 hover:border-purple-400/70 transition-colors"
+                    >
+                      <div className="flex items-start gap-3">
+                        <span className="text-purple-300 font-bold text-sm flex-shrink-0 min-w-[60px]" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                          Line {change.line}:
+                        </span>
+                        <div className="flex-1 space-y-2">
+                          <div className="bg-red-950/60 border-l-4 border-red-400 rounded px-3 py-2">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-red-400 font-bold">-</span>
+                              <span className="text-xs text-red-300 uppercase" style={{ fontFamily: "'Share Tech Mono', monospace" }}>Removed</span>
+                            </div>
+                            <p className="text-red-200 text-sm line-through opacity-90" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                              {change.old}
+                            </p>
                           </div>
-                          <div className="text-green-400">
-                            <span className="text-gray-600">+</span> {change.new}
+                          <div className="bg-green-950/60 border-l-4 border-green-400 rounded px-3 py-2">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-green-400 font-bold">+</span>
+                              <span className="text-xs text-green-300 uppercase" style={{ fontFamily: "'Share Tech Mono', monospace" }}>Added</span>
+                            </div>
+                            <p className="text-green-200 text-sm font-semibold" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                              {change.new}
+                            </p>
                           </div>
                         </div>
                       </div>
-                    </div>
+                    </motion.div>
                   ))}
                 </div>
               </div>
@@ -1184,35 +1192,40 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
 
             {/* Updated Code Preview */}
             {improvedCode && (
-              <div className="bg-gray-900/50 border border-gray-700 rounded-lg">
-                <div className="bg-gray-800/50 px-4 py-2 border-b border-gray-700 flex items-center justify-between">
-                  <p className="text-sm text-gray-300" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
-                    Updated Code Preview
-                  </p>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger>
-                        <span className="text-xs text-gray-500">👁 The Reaper altered this code</span>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p>Hover over changed lines to see what was modified</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
+              <div className="bg-[#1A1A1A] border-2 border-purple-500/70 rounded-lg overflow-hidden shadow-2xl">
+                <div className="bg-gradient-to-r from-purple-900 to-red-900 px-4 py-3 border-b-2 border-purple-500/70 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Code className="w-5 h-5 text-purple-300" />
+                    <p className="text-base font-bold text-purple-200" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                      ✨ Exorcised Code
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-purple-200 px-2 py-1 bg-purple-800/50 rounded border border-purple-400/50" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                      {selectedLanguage.toUpperCase()}
+                    </span>
+                  </div>
                 </div>
-                <div className="p-4 max-h-96 overflow-auto">
-                  <pre className="text-green-300 text-xs whitespace-pre-wrap relative" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
-                    <code>
+                <div className="p-6 bg-[#0F0F0F] max-h-[500px] overflow-auto">
+                  <pre className="text-green-300 text-sm leading-relaxed whitespace-pre-wrap relative" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                    <code className="block">
                       {improvedCode.split('\n').map((line, lineNum) => {
                         const lineNumber = lineNum + 1;
                         const isChanged = reviewData?.changes?.some(c => c.line === lineNumber);
                         return (
                           <div
                             key={lineNum}
-                            className={`px-2 py-0.5 ${isChanged ? 'bg-purple-900/30 border-l-2 border-purple-500' : ''}`}
-                            title={isChanged ? '👁 The Reaper altered this line' : ''}
+                            className={`px-3 py-1.5 hover:bg-gray-800/60 transition-colors ${
+                              isChanged 
+                                ? 'bg-purple-900/60 border-l-4 border-purple-400 shadow-lg shadow-purple-500/30' 
+                                : 'border-l-2 border-transparent'
+                            }`}
+                            title={isChanged ? '👻 The Reaper altered this line' : ''}
                           >
-                            {line || '\u00A0'}
+                            <span className="text-gray-400 text-xs mr-3 select-none">{String(lineNumber).padStart(3, ' ')}</span>
+                            <span className={isChanged ? 'text-green-200 font-semibold' : 'text-green-300'}>
+                              {line || '\u00A0'}
+                            </span>
                           </div>
                         );
                       })}
@@ -1223,32 +1236,54 @@ export function Demo({ onErrorIntensityChange }: DemoProps) {
             )}
           </div>
 
-          <DialogFooter className="relative z-10 gap-2">
+          <DialogFooter className="relative z-10 gap-3 flex-wrap">
             <Button
               onClick={handleDiscardCode}
               variant="outline"
-              className="border-red-500 text-red-400 hover:bg-red-950/50"
+              className="border-2 border-red-500/70 text-red-400 hover:bg-red-950/70 hover:border-red-500 px-6 py-3 text-sm font-medium transition-all"
               style={{ fontFamily: "'Share Tech Mono', monospace" }}
             >
               <X className="w-4 h-4 mr-2" />
-              Discard Changes
+              Discard
             </Button>
             <Button
               onClick={handleCopyCode}
               variant="outline"
-              className="border-purple-500 text-purple-400 hover:bg-purple-950/50"
+              className="border-2 border-purple-500/70 text-purple-400 hover:bg-purple-950/70 hover:border-purple-500 px-6 py-3 text-sm font-medium transition-all relative overflow-hidden group"
               style={{ fontFamily: "'Share Tech Mono', monospace" }}
             >
-              <Copy className="w-4 h-4 mr-2" />
-              Copy Updated Code
+              <motion.div
+                className="absolute inset-0 bg-gradient-to-r from-transparent via-purple-400/20 to-transparent"
+                animate={{
+                  x: ['-100%', '200%'],
+                }}
+                transition={{
+                  duration: 1.5,
+                  repeat: Infinity,
+                  repeatDelay: 0.5,
+                }}
+              />
+              <Copy className="w-4 h-4 mr-2 relative z-10" />
+              <span className="relative z-10">Copy to Clipboard</span>
             </Button>
             <Button
               onClick={handleAcceptCode}
-              className="bg-gradient-to-r from-red-600 to-purple-600 hover:from-red-700 hover:to-purple-700 text-white"
+              className="bg-gradient-to-r from-red-600 via-purple-600 to-red-600 hover:from-red-700 hover:via-purple-700 hover:to-red-700 text-white px-6 py-3 text-sm font-bold border-2 border-purple-500/50 shadow-lg shadow-purple-500/30 transition-all relative overflow-hidden group"
               style={{ fontFamily: "'Share Tech Mono', monospace" }}
             >
-              <Ghost className="w-4 h-4 mr-2" />
-              Accept & Create Pull Request
+              <motion.div
+                className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent"
+                animate={{
+                  x: ['-100%', '200%'],
+                }}
+                transition={{
+                  duration: 2,
+                  repeat: Infinity,
+                  repeatDelay: 0.5,
+                }}
+              />
+              <Check className="w-5 h-5 mr-2 relative z-10" />
+              <span className="relative z-10">Accept Changes</span>
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -10,11 +10,12 @@ import { BinaryRain } from './components/BinaryRain';
 import { LightningFlash } from './components/LightningFlash';
 import { GhostFlicker } from './components/GhostFlicker';
 import { AudioControls } from './components/AudioControls';
-import { getGitHubTokenFromURL, storeGitHubToken, initiateGitHubOAuth, getStoredGitHubToken } from './services/api';
+import { getGitHubTokenFromURL, storeGitHubToken, initiateGitHubOAuth, getStoredGitHubToken, getGitHubOAuthError } from './services/api';
 
 export default function App() {
   const [errorIntensity, setErrorIntensity] = useState(0);
   const [hasGitHubToken, setHasGitHubToken] = useState(false);
+  const [githubError, setGitHubError] = useState<string | null>(null);
 
   useEffect(() => {
     // Handle GitHub OAuth callback
@@ -22,8 +23,22 @@ export default function App() {
     if (token) {
       storeGitHubToken(token);
       setHasGitHubToken(true);
-      // Clean up URL
-      window.history.replaceState({}, document.title, window.location.pathname);
+      setGitHubError(null); // Clear any previous errors
+      // Clean up URL (getGitHubTokenFromURL already handles this, but ensure it's clean)
+      if (window.location.hash) {
+        window.location.hash = '';
+      }
+      if (window.location.search.includes('token=')) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    } else {
+      // Check for OAuth errors
+      const error = getGitHubOAuthError();
+      if (error) {
+        setGitHubError(error);
+        // Auto-dismiss after 10 seconds
+        setTimeout(() => setGitHubError(null), 10000);
+      }
     }
 
     // Check for existing GitHub token
@@ -62,6 +77,39 @@ export default function App() {
 
   return (
     <div className="relative bg-[#0A0A0A] text-white overflow-x-hidden min-h-screen">
+      {/* GitHub OAuth Error Toast */}
+      {githubError && (
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -20 }}
+          className="fixed top-6 left-1/2 transform -translate-x-1/2 z-[100] max-w-md"
+        >
+          <div className="bg-red-950/95 border-2 border-red-500/70 rounded-lg p-4 shadow-2xl">
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0">
+                <span className="text-red-400 text-xl">⚠️</span>
+              </div>
+              <div className="flex-1">
+                <p className="text-red-200 font-bold mb-1" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                  GitHub OAuth Error
+                </p>
+                <p className="text-red-300 text-sm leading-relaxed" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                  {githubError}
+                </p>
+              </div>
+              <button
+                onClick={() => setGitHubError(null)}
+                className="text-red-400 hover:text-red-300 transition-colors"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        </motion.div>
+      )}
+      
       {/* GitHub Button - Sticky Top Right - Always Visible */}
       <motion.div
         className="fixed top-6 right-6 z-50"
